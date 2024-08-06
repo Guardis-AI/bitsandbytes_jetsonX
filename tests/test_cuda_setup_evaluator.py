@@ -1,40 +1,38 @@
-import os
-from typing import List, NamedTuple
-
 import pytest
 
-import bitsandbytes as bnb
-from bitsandbytes.cuda_setup.main import (
-    determine_cuda_runtime_lib_path,
-    evaluate_cuda_setup,
-    extract_candidate_paths,
-)
+from bitsandbytes.cextension import get_cuda_bnb_library_path
+from bitsandbytes.cuda_specs import CUDASpecs
 
 
-def test_cuda_full_system():
-    ## this only tests the cuda version and not compute capability
-
-    # if CONDA_PREFIX exists, it has priority before all other env variables
-    # but it does not contain the library directly, so we need to look at the a sub-folder
-    version = ""
-    if "CONDA_PREFIX" in os.environ:
-        ls_output, err = bnb.utils.execute_and_return(f'ls -l {os.environ["CONDA_PREFIX"]}/lib/libcudart.so.11.0')
-        major, minor, revision = (ls_output.split(" ")[-1].replace("libcudart.so.", "").split("."))
-        version = float(f"{major}.{minor}")
-
-    if version == "" and "LD_LIBRARY_PATH" in os.environ:
-        ld_path = os.environ["LD_LIBRARY_PATH"]
-        paths = ld_path.split(":")
-        version = ""
-        for p in paths:
-            if "cuda" in p:
-                idx = p.rfind("cuda-")
-                version = p[idx + 5 : idx + 5 + 4].replace("/", "")
-                version = float(version)
-                break
+@pytest.fixture
+def cuda120_spec() -> CUDASpecs:
+    return CUDASpecs(
+        cuda_version_string="120",
+        highest_compute_capability=(8, 6),
+        cuda_version_tuple=(12, 0),
+    )
 
 
-    assert version > 0
-    binary_name, cudart_path, cuda, cc, cuda_version_string = evaluate_cuda_setup()
-    binary_name = binary_name.replace("libbitsandbytes_cuda", "")
-    assert binary_name.startswith(str(version).replace(".", ""))
+@pytest.fixture
+def cuda111_noblas_spec() -> CUDASpecs:
+    return CUDASpecs(
+        cuda_version_string="111",
+        highest_compute_capability=(7, 2),
+        cuda_version_tuple=(11, 1),
+    )
+
+
+def test_get_cuda_bnb_library_path(monkeypatch, cuda120_spec):
+    monkeypatch.delenv("BNB_CUDA_VERSION", raising=False)
+    assert get_cuda_bnb_library_path(cuda120_spec).stem == "libbitsandbytes_cuda120"
+
+
+def test_get_cuda_bnb_library_path_override(monkeypatch, cuda120_spec, caplog):
+    monkeypatch.setenv("BNB_CUDA_VERSION", "110")
+    assert get_cuda_bnb_library_path(cuda120_spec).stem == "libbitsandbytes_cuda110"
+    assert "BNB_CUDA_VERSION" in caplog.text  # did we get the warning?
+
+
+def test_get_cuda_bnb_library_path_nocublaslt(monkeypatch, cuda111_noblas_spec):
+    monkeypatch.delenv("BNB_CUDA_VERSION", raising=False)
+    assert get_cuda_bnb_library_path(cuda111_noblas_spec).stem == "libbitsandbytes_cuda111_nocublaslt"

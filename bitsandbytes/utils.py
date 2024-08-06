@@ -1,7 +1,10 @@
+import json
 import shlex
 import subprocess
-import torch
 from typing import Tuple
+
+import torch
+
 
 def outlier_hook(module, input):
     assert isinstance(module, torch.nn.Linear)
@@ -27,7 +30,7 @@ def outlier_hook(module, input):
             # (1) zscore test of std of hidden dimension
             outlier_idx = find_outlier_dims(merged, reduction_dim=1, zscore=3)
             # (2) magnitude > 6 test
-            dims = (torch.abs(input[0])> 6).sum(dim=list(range(len(input[0].shape)-1)))
+            dims = (torch.abs(input[0]) > 6).sum(dim=list(range(len(input[0].shape) - 1)))
             outlier_idx2 = torch.where(dims > 0)[0]
             outlier_idx = torch.cat([outlier_idx, outlier_idx2]).unique()
             tracer.hvalue2outlier_idx[hvalue] = outlier_idx
@@ -36,7 +39,7 @@ def outlier_hook(module, input):
             hook.remove()
 
 
-class OutlierTracer(object):
+class OutlierTracer:
     _instance = None
 
     def __init__(self):
@@ -56,14 +59,14 @@ class OutlierTracer(object):
                 self.hooks.append(m.register_forward_pre_hook(outlier_hook))
 
     def is_initialized(self):
-        return getattr(self, 'initialized', False)
+        return getattr(self, "initialized", False)
 
     def get_hvalue(self, weight):
         return weight.data.storage().data_ptr()
 
     def get_outliers(self, weight):
         if not self.is_initialized():
-            print('Outlier tracer is not initialized...')
+            print("Outlier tracer is not initialized...")
             return None
         hvalue = self.get_hvalue(weight)
         if hvalue in self.hvalue2outlier_idx:
@@ -77,6 +80,7 @@ class OutlierTracer(object):
             cls._instance = cls.__new__(cls)
         return cls._instance
 
+
 def find_outlier_dims(weight, reduction_dim=0, zscore=4.0, topk=None, rdm=False):
     if rdm:
         return torch.randint(0, weight.shape[1], size=(topk,), device=weight.device).long()
@@ -84,13 +88,13 @@ def find_outlier_dims(weight, reduction_dim=0, zscore=4.0, topk=None, rdm=False)
     m = weight.mean(reduction_dim)
     mm = m.mean()
     mstd = m.std()
-    zm = (m-mm)/mstd
+    zm = (m - mm) / mstd
 
     std = weight.std(reduction_dim)
     stdm = std.mean()
     stdstd = std.std()
 
-    zstd = (std-stdm)/stdstd
+    zstd = (std - stdm) / stdstd
 
     if topk is not None:
         val, idx = torch.topk(std.abs(), k=topk, dim=0)
@@ -99,10 +103,33 @@ def find_outlier_dims(weight, reduction_dim=0, zscore=4.0, topk=None, rdm=False)
 
     return idx
 
-def replace_linear(model, linear_replacement, skip_modules=["lm_head"], copy_weights=False, post_processing_function=None):
+
+def execute_and_return(command_string: str) -> Tuple[str, str]:
+    def _decode(subprocess_err_out_tuple):
+        return tuple(to_decode.decode("UTF-8").strip() for to_decode in subprocess_err_out_tuple)
+
+    def execute_and_return_decoded_std_streams(command_string):
+        return _decode(
+            subprocess.Popen(
+                shlex.split(command_string),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ).communicate(),
+        )
+
+    std_out, std_err = execute_and_return_decoded_std_streams(command_string)
+    return std_out, std_err
+
+
+def replace_linear(
+    model,
+    linear_replacement,
+    skip_modules=("lm_head",),
+    copy_weights=False,
+    post_processing_function=None,
+):
     """
     Replace linear modules with a new Linear module.
-
     Parameters:
         model (`torch.nn.Module`):
             Input model or `torch.nn.Module` as the function is run recursively.
@@ -113,7 +140,7 @@ def replace_linear(model, linear_replacement, skip_modules=["lm_head"], copy_wei
             List of modules names not to convert. Defaults to `lm_head`.
         copy_weights (`bool`):
             Copy the weights from the old linear module to the new one
-        post_processing_fun_name (`str`):
+        post_processing_function (`str`):
             A function name of the replacement linear class that is called
             after processing.
     """
@@ -133,27 +160,45 @@ def replace_linear(model, linear_replacement, skip_modules=["lm_head"], copy_wei
                 model._modules[name].bias = old_module.bias
 
             if post_processing_function is not None:
-               func = getattr(module, post_processing_function, None)
-               if func is not None: func(module)
+                func = getattr(module, post_processing_function, None)
+                if func is not None:
+                    func(module)
     return model
 
 
+def pack_dict_to_tensor(source_dict):
+    """
+    Pack a dictionary into a torch tensor for storing quant_state items in state_dict.
 
-def execute_and_return(command_string: str) -> Tuple[str, str]:
-    def _decode(subprocess_err_out_tuple):
-        return tuple(
-            to_decode.decode("UTF-8").strip()
-            for to_decode in subprocess_err_out_tuple
-        )
+    Parameters:
+    - source_dict: The dictionary to be packed.
 
-    def execute_and_return_decoded_std_streams(command_string):
-        return _decode(
-            subprocess.Popen(
-                shlex.split(command_string),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            ).communicate()
-        )
+    Returns:
+    A torch tensor containing the packed data.
+    """
+    json_str = json.dumps(source_dict)
+    json_bytes = json_str.encode("utf-8")
+    tensor_data = torch.tensor(list(json_bytes), dtype=torch.uint8)
 
-    std_out, std_err = execute_and_return_decoded_std_streams(command_string)
-    return std_out, std_err
+    return tensor_data
+
+
+def unpack_tensor_to_dict(tensor_data):
+    """
+    Unpack a torch tensor into a Python dictionary.
+
+    Parameters:
+    - tensor_data: The torch tensor containing the packed data.
+
+    Returns:
+    A Python dictionary containing the unpacked data.
+    """
+    json_bytes = bytes(tensor_data.cpu().numpy())
+    json_str = json_bytes.decode("utf-8")
+    unpacked_dict = json.loads(json_str)
+
+    return unpacked_dict
+
+
+LINEAR_8BIT_WEIGHTS_FORMAT_MAPPING = {"row": 0, "col32": 1, "col_turing": 2, "col_ampere": 3}
+INVERSE_LINEAR_8BIT_WEIGHTS_FORMAT_MAPPING = {val: name for (name, val) in LINEAR_8BIT_WEIGHTS_FORMAT_MAPPING.items()}
